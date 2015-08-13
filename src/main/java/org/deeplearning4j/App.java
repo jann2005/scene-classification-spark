@@ -1,5 +1,6 @@
 package org.deeplearning4j;
 
+import org.apache.commons.io.FileUtils;
 import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
@@ -18,9 +19,13 @@ import org.deeplearning4j.nn.multilayer.MultiLayerNetwork;
 import org.deeplearning4j.nn.weights.WeightInit;
 import org.deeplearning4j.spark.impl.multilayer.SparkDl4jMultiLayer;
 import org.deeplearning4j.spark.util.MLLibUtil;
+import org.nd4j.linalg.factory.Nd4j;
 import org.nd4j.linalg.lossfunctions.LossFunctions;
 import scala.Tuple2;
 
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.util.Arrays;
 import java.util.List;
 
@@ -29,7 +34,7 @@ import java.util.List;
  *
  */
 public class App {
-    public static void main( String[] args ) {
+    public static void main( String[] args ) throws Exception {
         JavaSparkContext sc = new JavaSparkContext(new SparkConf().setMaster("local[*]").setAppName("scenes"));
         //load the images from the bucket setting the size to 28 x 28
         String s3Bucket = "s3n://scenesdata/data/*";
@@ -99,6 +104,9 @@ public class App {
         // Get evaluation metrics.
         MulticlassMetrics metrics = new MulticlassMetrics(predictionAndLabels.rdd());
         double precision = metrics.fMeasure();
+        BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(""));
+        Nd4j.write(bos,trainedNetwork.params());
+        FileUtils.write(new File("conf.yaml"),trainedNetwork.conf().toYaml());
         System.out.println("F1 = " + precision);
 
 
