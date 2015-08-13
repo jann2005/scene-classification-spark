@@ -30,7 +30,7 @@ import java.util.List;
  */
 public class App {
     public static void main( String[] args ) {
-        JavaSparkContext sc = new JavaSparkContext(new SparkConf());
+        JavaSparkContext sc = new JavaSparkContext(new SparkConf().setMaster("local[*]"));
         //load the images from the bucket setting the size to 28 x 28
         String s3Bucket = "s3n://scenesdata/data/*";
         List<String> labels = Arrays.asList("beach", "desert", "forest", "mountain", "rain", "snow");
