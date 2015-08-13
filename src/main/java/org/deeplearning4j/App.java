@@ -32,7 +32,7 @@ public class App {
     public static void main( String[] args ) {
         JavaSparkContext sc = new JavaSparkContext(new SparkConf());
         //load the images from the bucket setting the size to 28 x 28
-        String s3Bucket = "s3n://scenes/*";
+        String s3Bucket = "s3n://scenesdata/data/*";
         List<String> labels = Arrays.asList("beach", "desert", "forest", "mountain", "rain", "snow");
         int nIn = 784;
         //normalize the data to zero mean and unit variance
