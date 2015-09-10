@@ -14,21 +14,31 @@ import org.canova.api.records.reader.RecordReader;
 import org.canova.api.split.FileSplit;
 import org.canova.image.recordreader.ImageRecordReader;
 import org.deeplearning4j.datasets.canova.RecordReaderDataSetIterator;
+import org.deeplearning4j.datasets.iterator.impl.LFWDataSetIterator;
 import org.deeplearning4j.datasets.iterator.impl.ListDataSetIterator;
 import org.deeplearning4j.eval.Evaluation;
 import org.deeplearning4j.nn.api.OptimizationAlgorithm;
 import org.deeplearning4j.nn.conf.MultiLayerConfiguration;
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
+import org.deeplearning4j.nn.conf.layers.ConvolutionLayer;
 import org.deeplearning4j.nn.conf.layers.DenseLayer;
 import org.deeplearning4j.nn.conf.layers.OutputLayer;
+import org.deeplearning4j.nn.conf.layers.SubsamplingLayer;
+import org.deeplearning4j.nn.conf.layers.setup.ConvolutionLayerSetup;
+import org.deeplearning4j.nn.conf.preprocessor.CnnToFeedForwardPreProcessor;
+import org.deeplearning4j.nn.conf.preprocessor.FeedForwardToCnnPreProcessor;
 import org.deeplearning4j.nn.multilayer.MultiLayerNetwork;
 import org.deeplearning4j.nn.weights.WeightInit;
 import org.deeplearning4j.optimize.listeners.ScoreIterationListener;
 import org.deeplearning4j.spark.impl.multilayer.SparkDl4jMultiLayer;
 import org.deeplearning4j.spark.util.MLLibUtil;
+import org.deeplearning4j.util.SerializationUtils;
+import org.nd4j.linalg.api.buffer.DataBuffer;
+import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.dataset.DataSet;
 import org.nd4j.linalg.dataset.SplitTestAndTrain;
 import org.nd4j.linalg.dataset.api.iterator.DataSetIterator;
+import org.nd4j.linalg.dataset.api.iterator.MultipleEpochsIterator;
 import org.nd4j.linalg.factory.Nd4j;
 import org.nd4j.linalg.lossfunctions.LossFunctions;
 import scala.Tuple2;
@@ -49,46 +59,82 @@ public class AppLocal {
         // Path to the labeled images
         String labeledPath = System.getProperty("user.home")+"/data";
         List<String> labels = new ArrayList<>(Arrays.asList("beach", "desert", "forest", "mountain", "rain", "snow"));
+        //List<String> labels = new ArrayList<>(Arrays.asList("mountain", "rain"));
+        final int numRows = 75;
+        final int numColumns = 75;
+        int nChannels = 3;
+        int outputNum = labels.size();
+        int batchSize = 1000;
+        int iterations = 10;
+        int seed = 123;
 
+        Nd4j.ENFORCE_NUMERICAL_STABILITY = true;
         // Instantiating a RecordReader pointing to the data path with the specified
         // height and width for each image.
-        int height = 75;
-        int width = 75;
-        int nIn = height * width;
-        RecordReader recordReader = new ImageRecordReader(height, width, true,labels);
-        recordReader.initialize(new FileSplit(new File(labeledPath)));
-
-        // Canova to Dl4j
-        DataSetIterator iter = new RecordReaderDataSetIterator(recordReader,60000, nIn,labels.size());
-
-
+        int nIn = numRows * numColumns * nChannels;
 
         //setup the network
-        MultiLayerConfiguration conf = new NeuralNetConfiguration.Builder().l2(2e-4).learningRate(1e-3)
-                .l1(1e-1).optimizationAlgo(OptimizationAlgorithm.STOCHASTIC_GRADIENT_DESCENT)
-                .regularization(true).miniBatch(true).constrainGradientToUnitNorm(true)
-                .list(4).backprop(true).pretrain(false)
-                .layer(0,new DenseLayer.Builder().nIn(nIn).nOut(5000).activation("relu")
+        MultiLayerConfiguration.Builder builder = new NeuralNetConfiguration.Builder()
+                .seed(seed)
+                .batchSize(batchSize)
+                .iterations(iterations)
+                .constrainGradientToUnitNorm(true)
+                .optimizationAlgo(OptimizationAlgorithm.STOCHASTIC_GRADIENT_DESCENT)
+                .list(4)
+                .layer(0, new ConvolutionLayer.Builder(5, 5)
+                        .nOut(2).dropOut(0.5)
                         .weightInit(WeightInit.XAVIER)
+                        .activation("relu")
                         .build())
-                .layer(1, new DenseLayer.Builder().nIn(5000).nOut(4000).activation("relu")
+                .layer(1, new ConvolutionLayer.Builder(3, 3)
+                        .nOut(2).dropOut(0.5)
                         .weightInit(WeightInit.XAVIER)
+                        .activation("relu")
                         .build())
-                .layer(2, new DenseLayer.Builder().nIn(4000).nOut(3000).activation("relu")
+                .layer(2, new SubsamplingLayer
+                        .Builder(SubsamplingLayer.PoolingType.MAX, new int[]{2, 2})
+                        .build())
+                .layer(3, new OutputLayer.Builder(LossFunctions.LossFunction.NEGATIVELOGLIKELIHOOD)
+                        .nOut(outputNum)
                         .weightInit(WeightInit.XAVIER)
-                        .build())
-                .layer(3,new OutputLayer.Builder(LossFunctions.LossFunction.MCXENT)
                         .activation("softmax")
-                        .nIn(3000).nOut(labels.size()).weightInit(WeightInit.XAVIER)
-                        .build()).build();
+                        .build())
+                .backprop(true).pretrain(false);
+
+        new ConvolutionLayerSetup(builder,numRows,numColumns,nChannels);
+        MultiLayerConfiguration conf = builder.build();
+
 
         MultiLayerNetwork trainedNetwork = new MultiLayerNetwork(conf);
+        trainedNetwork.init();
         trainedNetwork.setListeners(new ScoreIterationListener(1));
-        DataSet next = iter.next();
-        next.scale();
-        next.shuffle();
-        SplitTestAndTrain testAndTrain = next.splitTestAndTrain(0.6);
-        DataSetIterator trainIterator = new ListDataSetIterator(testAndTrain.getTrain().asList(),100);
+
+
+        RecordReader recordReader = new ImageRecordReader(numRows, numColumns,nChannels, true,labels);
+        recordReader.initialize(new FileSplit(new File(labeledPath)));
+        labels.remove("data");
+        // Canova to Dl4j
+        DataSetIterator iter = new RecordReaderDataSetIterator(recordReader,60000, nIn,labels.size());
+        DataSet next2 = iter.next();
+        next2.normalizeZeroMeanZeroUnitVariance();
+        System.out.println("Training on data set of " + next2.numExamples() + " with num features " + next2.getFeatureMatrix().size(1) + " and labels " + next2.getLabels().size(1));
+        SplitTestAndTrain testAndTrain = next2.splitTestAndTrain(0.8);
+
+
+        DataSetIterator trainIterator = new ListDataSetIterator(testAndTrain.getTrain().asList(),10);
+        while(trainIterator.hasNext()) {
+            DataSet next = trainIterator.next();
+            System.out.println("Training on one batch");
+            trainedNetwork.fit(next);
+            System.out.println("One batch done with score " + trainedNetwork.score());
+        }
+
+
+        Evaluation evaluation = new Evaluation(labels.size());
+        evaluation.eval(testAndTrain.getTest().getLabels(),trainedNetwork.output(testAndTrain.getTest().getFeatureMatrix(), true));
+        System.out.println(evaluation.stats());
+     /* //  SplitTestAndTrain testAndTrain = next.splitTestAndTrain(0.6);
+        DataSetIterator trainIterator = new MultipleEpochsIterator(5,new ListDataSetIterator(testAndTrain.getTrain().asList(),100));
         while(trainIterator.hasNext())
             trainedNetwork.fit(trainIterator.next());
         Evaluation evaluation = new Evaluation(labels.size());
@@ -96,7 +142,7 @@ public class AppLocal {
         BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream("newimagemodel.bin"));
         Nd4j.write(bos,trainedNetwork.params());
         FileUtils.write(new File("conf.yaml"),trainedNetwork.conf().toYaml());
-        System.out.println(evaluation.stats());
+        System.out.println(evaluation.stats());*/
 
 
     }

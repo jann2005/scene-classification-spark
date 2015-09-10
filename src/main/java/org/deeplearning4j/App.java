@@ -11,10 +11,15 @@ import org.apache.spark.mllib.feature.StandardScalerModel;
 import org.apache.spark.mllib.linalg.Vector;
 import org.apache.spark.mllib.regression.LabeledPoint;
 import org.canova.image.recordreader.ImageRecordReader;
+import org.deeplearning4j.nn.api.OptimizationAlgorithm;
 import org.deeplearning4j.nn.conf.MultiLayerConfiguration;
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
+import org.deeplearning4j.nn.conf.layers.ConvolutionLayer;
 import org.deeplearning4j.nn.conf.layers.DenseLayer;
 import org.deeplearning4j.nn.conf.layers.OutputLayer;
+import org.deeplearning4j.nn.conf.layers.SubsamplingLayer;
+import org.deeplearning4j.nn.conf.preprocessor.CnnToFeedForwardPreProcessor;
+import org.deeplearning4j.nn.conf.preprocessor.FeedForwardToCnnPreProcessor;
 import org.deeplearning4j.nn.multilayer.MultiLayerNetwork;
 import org.deeplearning4j.nn.weights.WeightInit;
 import org.deeplearning4j.spark.impl.multilayer.SparkDl4jMultiLayer;
@@ -34,14 +39,23 @@ import java.util.List;
  *
  */
 public class App {
-    public static void main( String[] args ) throws Exception {
+    public static void main( String[] args) throws Exception {
+        List<String> labels = Arrays.asList("beach", "desert", "forest", "mountain", "rain", "snow");
+
+        final int numRows = 28;
+        final int numColumns = 28;
+        int nChannels = 3;
+        int outputNum = labels.size();
+        int batchSize = 500;
+        int iterations = 10;
+        int seed = 123;
+
         JavaSparkContext sc = new JavaSparkContext(new SparkConf().setMaster("local[*]").setAppName("scenes"));
         //load the images from the bucket setting the size to 28 x 28
         String s3Bucket = "s3n://scenesdata/data/*";
-        List<String> labels = Arrays.asList("beach", "desert", "forest", "mountain", "rain", "snow");
-        int nIn = 784;
         //normalize the data to zero mean and unit variance
-        JavaRDD<LabeledPoint> data = MLLibUtil.fromBinary(sc.binaryFiles(s3Bucket), new ImageRecordReader(28,28,labels));
+        JavaRDD<LabeledPoint> data = MLLibUtil.fromBinary(sc.binaryFiles(s3Bucket)
+                , new ImageRecordReader(28,28,labels));
         StandardScaler scaler = new StandardScaler(true,true);
 
         final StandardScalerModel scalarModel = scaler.fit(data.map(new Function<LabeledPoint, Vector>() {
@@ -67,22 +81,37 @@ public class App {
 
 
         //setup the network
+
+        //setup the network
+        //setup the network
         MultiLayerConfiguration conf = new NeuralNetConfiguration.Builder()
-                .list(4).backprop(true)
-                .layer(0,new DenseLayer.Builder().nIn(nIn).nOut(600).activation("relu")
+                .seed(seed)
+                .batchSize(batchSize)
+                .iterations(iterations).regularization(true)
+                .l2(2e-4).l1(0.1)
+                .constrainGradientToUnitNorm(true)
+                .optimizationAlgo(OptimizationAlgorithm.STOCHASTIC_GRADIENT_DESCENT)
+                .list(3)
+                .layer(0, new ConvolutionLayer.Builder(5, 5)
+                        .nIn(nChannels)
+                        .nOut(6).dropOut(0.5)
                         .weightInit(WeightInit.XAVIER)
+                        .activation("relu")
                         .build())
-                .layer(1, new DenseLayer.Builder().nIn(600).nOut(500).activation("relu")
-                        .weightInit(WeightInit.XAVIER).dropOut(0.6)
+                .layer(1, new SubsamplingLayer
+                        .Builder(SubsamplingLayer.PoolingType.MAX, new int[]{2, 2})
                         .build())
-                .layer(2, new DenseLayer.Builder().nIn(500).nOut(250).activation("relu")
+                .layer(2, new OutputLayer.Builder(LossFunctions.LossFunction.NEGATIVELOGLIKELIHOOD)
+                        .nIn(216)
+                        .nOut(outputNum)
                         .weightInit(WeightInit.XAVIER)
-                        .build())
-                .layer(3,new OutputLayer.Builder(LossFunctions.LossFunction.MCXENT)
                         .activation("softmax")
-                        .nIn(250).nOut(labels.size()).weightInit(WeightInit.XAVIER)
-                        .build()).build();
-       //train the network
+                        .build())
+                .inputPreProcessor(0, new FeedForwardToCnnPreProcessor(numRows, numColumns, nChannels))
+                .inputPreProcessor(2, new CnnToFeedForwardPreProcessor())
+                .backprop(true).pretrain(false)
+                .build();
+        //train the network
         SparkDl4jMultiLayer trainLayer = new SparkDl4jMultiLayer(sc.sc(),conf);
         //fit on the training set
         MultiLayerNetwork trainedNetwork = trainLayer.fit(sc, trainTestSplit[0]);
